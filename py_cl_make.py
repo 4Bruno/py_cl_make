@@ -42,31 +42,50 @@ DEFAULT_WARNINGS = ('/W4',
                     DISABLE_WARNING_UNREFERENCED_FORMAL_PARAM
                     )
 
+def GetFileExt(file):
+    return file[file.rindex('.'):]
+
+def CreateListAllEnvironFiles():
+    """
+    lookup lower case file name
+    """
+    system_paths = os.environ["PATH"].split(";")
+    system_paths.append(os.getcwd())
+    system_files = {}
+    for d in system_paths:
+        if os.path.exists(d):
+            for f in os.listdir(d):
+                system_files[f.lower()] = os.path.join(d,f)
+    return system_files
+
 class Compiler:
     def __init__(self,relative_src_files):
         self.last_modified = {}
         self.system_files_cache = {}
         self.dirty_dll = [] 
         self.relative_src_files = relative_src_files
-        system_paths = os.environ["PATH"].split(";")
-        system_paths.append(os.getcwd())
-        for d in system_paths:
-            if os.path.exists(d):
-                for f in os.listdir(d):
-                    self.system_files_cache[f.lower()] = os.path.join(d,f)
+        self.system_files_cache = CreateListAllEnvironFiles()
+        # TODO: Check if has been invoked
+        vcvars64Invoked = True
+
+    def __enter__(self):
+        """
+        List of cached timestamp for files changes
+        """
         with open('.compiler_cache.db','a+') as db:
             db.seek(0)
             for line in db.readlines():
                 if (len(line) > 0):
                     source_file, timestamp = line.split(',')
+                    timestamp = timestamp.replace('\n','')
                     self.last_modified[source_file] = \
-                        datetime.datetime.strptime(timestamp.replace('\n',''),'%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M:%S')
-        vcvars64Invoked = True
-
-    def __enter__(self):
+                        datetime.datetime.strptime(timestamp,'%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M:%S')
         return self
 
     def __exit__(self,*exc_details):
+        """
+        Save back timestamp of file changes
+        """
         with open('./.compiler_cache.db','w+') as db:
             for dll in self.last_modified:
                 entry = ','.join([dll,self.last_modified[dll]])
@@ -85,56 +104,54 @@ class Compiler:
             file = self.system_files_cache[file]
         return datetime.datetime.fromtimestamp(os.path.getmtime(file)).strftime('%Y-%m-%d %H:%M:%S')
 
-    def __BuildDll(self,is_exe,dlls,ext_libs, debug_mode, use_cache):
-        name = dlls[0].replace('.lib','.dll')
+    def __AnyFileHasChanged(self, files_to_check):
+        for file in files_to_check:
+            if file in self.last_modified:
+                last_time_stamp = self.last_modified[file]
+                new_time_stamp = self.getFileTimeStamp(file)
+                if last_time_stamp != new_time_stamp:
+                    return True
+            else:
+                return True
+
+    def __BuildDll(self,output_name,is_exe,dlls,ext_libs, debug_mode, use_cache):
+        output_name_dll = output_name + '.dll'
+        output_name_obj = output_name + '.obj'
         dlls_fullpath = []
         for dll in dlls:
             dlls_fullpath.append(os.path.join(self.relative_src_files, dll))
-        need_compilation = (name in self.dirty_dll)
+        need_compilation = (output_name_dll in self.dirty_dll)
         if use_cache and not need_compilation:
-            for dll in dlls_fullpath:
-                if dll in self.last_modified:
-                    last_time_stamp = self.last_modified[dll]
-                    new_time_stamp = self.getFileTimeStamp(dll)
-                    if last_time_stamp != new_time_stamp:
-                        need_compilation = True
-                        break
-                else:
-                    need_compilation = True
-                    break
-            for lib in ext_libs:
-                if lib in self.last_modified:
-                    last_time_stamp = self.last_modified[lib]
-                    new_time_stamp = self.getFileTimeStamp(lib)
-                    if last_time_stamp != new_time_stamp:
-                        print("lib %s changed" % lib)
-                        need_compilation = True
-                        break
-                    else:
-                        print("lib %s didnt changed" % lib)
-
+            need_compilation = self.__AnyFileHasChanged(dlls_fullpath)
+            need_compilation = self.__AnyFileHasChanged(ext_libs)
             if not need_compilation:
-                print("No changes. Skipping compilation for %s" % (dlls[0]))
+                print("No changes. Skipping compilation for %s" % (output_name))
                 return
-        PopenListArgs = ['cl','/nologo']
+        PopenListArgs = ['cl','/nologo','/Fo:' + output_name_obj]
         WarningArgs = DEFAULT_WARNINGS
         Optimization = '/Od' if debug_mode else '/O2'
         CompilerArgs = ['/MTd','/Zi','/I..\..\include',Optimization]
         if not is_exe: CompilerArgs.insert(0,'/LD')
-        LinkerArgs = ['/link','/incremental:no','/opt:ref']
+        LinkerArgs = ['/link','/incremental:no','/opt:ref','/OUT:' + output_name_dll]
         if not is_exe: LinkerArgs.insert(1,'/DLL')
         PopenListArgs.extend(CompilerArgs)
         PopenListArgs.extend(WarningArgs)
         PopenListArgs.extend(dlls_fullpath)
         PopenListArgs.extend(LinkerArgs)
         PopenListArgs.extend(ext_libs)
-        self.__Compile(name,PopenListArgs,dlls_fullpath,ext_libs)
+        self.__Compile(output_name_dll,PopenListArgs,dlls_fullpath,ext_libs)
 
-    def BuildLib(self,dlls,ext_libs, debug_mode,use_cache):
-        self.__BuildDll(False,dlls,ext_libs,debug_mode,use_cache)
+    def BuildLib(self,output_name,dlls,ext_libs, debug_mode,use_cache):
+        """
+        ouput_name should be the name without file extensions as they will be properly set by compiler
+        """
+        self.__BuildDll(output_name,False,dlls,ext_libs,debug_mode,use_cache)
 
-    def BuildExe(self,dlls,ext_libs, debug_mode,use_cache):
-        self.__BuildDll(True,dlls,ext_libs,debug_mode,use_cache)
+    def BuildExe(self,output_name,dlls,ext_libs, debug_mode,use_cache):
+        """
+        ouput_name should be the name without file extensions as they will be properly set by compiler
+        """
+        self.__BuildDll(output_name,True,dlls,ext_libs,debug_mode,use_cache)
 
     def __Compile(self, name, Args, dlls, ext_libs):
         try:
@@ -156,7 +173,8 @@ class Compiler:
 
 
 class Dll:
-    def __init__(self, source_files, external_libs=[],executable=False):
+    def __init__(self,output_name, source_files, external_libs=[],executable=False):
+        self.output_name = output_name
         self.source_files = []
         self.external_libs = []
         self.executable = executable
@@ -183,7 +201,7 @@ def BuildSolution(dlls,relative_src_files,debug_mode=False,use_cache=True):
         for file in os.listdir(output_folder):
             file_ext = None
             try:
-                file_ext = file[file.rindex('.'):]
+                file_ext = GetFileExt(file)
             except:
                 pass
             if file_ext in known_build_files_ext:
@@ -194,9 +212,9 @@ def BuildSolution(dlls,relative_src_files,debug_mode=False,use_cache=True):
             with Compiler(relative_src_files) as compiler:
                 for dll in dlls:
                     if dll.executable:
-                        compiler.BuildExe(dll.source_files,dll.external_libs, debug_mode=debug_mode,use_cache=use_cache)
+                        compiler.BuildExe(dll.output_name,dll.source_files,dll.external_libs, debug_mode=debug_mode,use_cache=use_cache)
                     else:
-                        compiler.BuildLib(dll.source_files,dll.external_libs, debug_mode=debug_mode,use_cache=use_cache)
+                        compiler.BuildLib(dll.output_name,dll.source_files,dll.external_libs, debug_mode=debug_mode,use_cache=use_cache)
 
 """
 Folder structure expected:
@@ -209,8 +227,8 @@ Folder structure expected:
         release/
 """
 
-Test = Dll(['test.cpp'])
-Exe = Dll(['main.cpp'],['test.obj'],executable=True)
+Test = Dll('test',['test.cpp'])
+Exe = Dll('main',['main.cpp'],['test.obj'],executable=True)
 
 
 DLLS_SOLUTION = [Test, Exe]
